@@ -163,6 +163,69 @@ def test_aws_profile_path_not_cached_in_iam_cache():
         assert mock_profile.call_count == 2
 
 
+def test_get_credentials_does_not_dereference_os_environ_in_aws_params():
+    """
+    SEC LIT-3831: a request-supplied aws_profile_name of the form os.environ/<VAR>
+    must NOT be dereferenced to a server env var inside get_credentials. boto3 only
+    ever sees the literal string, so a caller cannot exfiltrate server secrets
+    (DB creds, master key) by injecting AWS auth params.
+    """
+    env = _os_environ_without_aws_keys()
+    env["LITELLM_SEC_CANARY"] = "super-secret-db-url"
+    base = BaseAWSLLM()
+    with patch.dict(os.environ, env, clear=True), patch.object(
+        base,
+        "_auth_with_aws_profile",
+        return_value=(Credentials("ak", "sk", None), None),
+    ) as mock_profile:
+        base.get_credentials(aws_profile_name="os.environ/LITELLM_SEC_CANARY")
+
+    assert mock_profile.call_args.args[0] == "os.environ/LITELLM_SEC_CANARY"
+    assert "super-secret-db-url" not in str(mock_profile.call_args)
+
+
+def test_get_credentials_still_falls_back_to_ambient_aws_profile_name_env():
+    """
+    The fixed AWS_* ambient fallback (operator env, hard-coded key names) keeps
+    working after the os.environ/ dereference is removed: an unset aws_profile_name
+    resolves from the AWS_PROFILE_NAME environment variable.
+    """
+    env = _os_environ_without_aws_keys()
+    env["AWS_PROFILE_NAME"] = "ambient-profile"
+    base = BaseAWSLLM()
+    with patch.dict(os.environ, env, clear=True), patch.object(
+        base,
+        "_auth_with_aws_profile",
+        return_value=(Credentials("ak", "sk", None), None),
+    ) as mock_profile:
+        base.get_credentials(aws_profile_name=None)
+
+    assert mock_profile.call_args.args[0] == "ambient-profile"
+
+
+def test_get_credentials_ambient_fallback_resolves_aws_external_id():
+    """
+    Each unset param must fall back to its OWN AWS_* env var. Regression for the
+    index misalignment where aws_external_id wrongly read AWS_BEDROCK_RUNTIME_ENDPOINT
+    (params_to_check and aws_authentication_params were not aligned), leaving
+    AWS_EXTERNAL_ID unresolved.
+    """
+    env = _os_environ_without_aws_keys()
+    env["AWS_EXTERNAL_ID"] = "ext-from-env"
+    base = BaseAWSLLM()
+    with patch.dict(os.environ, env, clear=True), patch.object(
+        base,
+        "_auth_with_aws_role",
+        return_value=(Credentials("ak", "sk", "tok"), None),
+    ) as mock_role:
+        base.get_credentials(
+            aws_role_name="arn:aws:iam::123456789012:role/x",
+            aws_session_name="s",
+        )
+
+    assert mock_role.call_args.kwargs["aws_external_id"] == "ext-from-env"
+
+
 def test_web_identity_path_not_cached_in_iam_cache():
     base = BaseAWSLLM()
     with patch.object(

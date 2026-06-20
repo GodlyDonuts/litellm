@@ -10,7 +10,6 @@ from typing import (
     Callable,
     ClassVar,
     Dict,
-    List,
     Literal,
     Optional,
     Tuple,
@@ -210,32 +209,12 @@ class BaseAWSLLM:
         """
         Return a boto3.Credentials object
         """
-        ## CHECK IS  'os.environ/' passed in
-        params_to_check: List[Optional[str]] = [
-            aws_access_key_id,
-            aws_secret_access_key,
-            aws_session_token,
-            aws_region_name,
-            aws_session_name,
-            aws_profile_name,
-            aws_role_name,
-            aws_web_identity_token,
-            aws_sts_endpoint,
-            aws_external_id,
-        ]
-
-        # Iterate over parameters and update if needed
-        for i, param in enumerate(params_to_check):
-            if param and param.startswith("os.environ/"):
-                _v = get_secret(param)
-                if _v is not None and isinstance(_v, str):
-                    params_to_check[i] = _v
-            elif param is None:  # check if uppercase value in env
-                key = self.aws_authentication_params[i]
-                if key.upper() in os.environ:
-                    params_to_check[i] = os.getenv(key.upper())
-
-        # Assign updated values back to parameters
+        # SEC LIT-3831: do not dereference os.environ/<VAR> on values reaching here.
+        # Server-config os.environ/ references are already resolved at config-load
+        # time (proxy _check_for_os_environ_vars / router deployment load), so any
+        # os.environ/ prefix still present is untrusted request input; resolving it
+        # would let a caller read arbitrary server env vars (DB creds, master key).
+        # Each unset param falls back to its matching fixed AWS_* ambient env var.
         (
             aws_access_key_id,
             aws_secret_access_key,
@@ -247,7 +226,21 @@ class BaseAWSLLM:
             aws_web_identity_token,
             aws_sts_endpoint,
             aws_external_id,
-        ) = params_to_check
+        ) = tuple(
+            value if value is not None else os.getenv(env_var)
+            for value, env_var in (
+                (aws_access_key_id, "AWS_ACCESS_KEY_ID"),
+                (aws_secret_access_key, "AWS_SECRET_ACCESS_KEY"),
+                (aws_session_token, "AWS_SESSION_TOKEN"),
+                (aws_region_name, "AWS_REGION_NAME"),
+                (aws_session_name, "AWS_SESSION_NAME"),
+                (aws_profile_name, "AWS_PROFILE_NAME"),
+                (aws_role_name, "AWS_ROLE_NAME"),
+                (aws_web_identity_token, "AWS_WEB_IDENTITY_TOKEN"),
+                (aws_sts_endpoint, "AWS_STS_ENDPOINT"),
+                (aws_external_id, "AWS_EXTERNAL_ID"),
+            )
+        )
 
         verbose_logger.debug(
             "in get credentials\n"
